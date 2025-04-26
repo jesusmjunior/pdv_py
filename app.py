@@ -1,9 +1,11 @@
 import streamlit as st
-import psycopg2
-import psycopg2.extras
+import sqlite3
 import pandas as pd
+import json
 import datetime
 import base64
+import os
+from urllib.parse import quote
 
 # Configuração da página
 st.set_page_config(
@@ -12,50 +14,125 @@ st.set_page_config(
     layout="wide"
 )
 
-# Configuração do banco de dados PostgreSQL - conexão direta
-@st.cache_resource
-def init_connection():
-    try:
-        return psycopg2.connect(
-            host="34.95.252.164",
-            database="pdv",
-            user="postgres",
-            password="pdv@2025",
-            port="5432",
-            sslmode="require"
-        )
-    except Exception as e:
-        st.error(f"Erro de conexão com banco de dados: {str(e)}")
-        return None
+# Usar SQLite em vez de PostgreSQL (biblioteca nativa)
+# Armazenamento local para simulação sem banco externo
+DB_PATH = "pdv_local.db"
 
-# Função para executar consultas SQL
-@st.cache_data(ttl=5)
-def run_query(query, params=None):
-    conn = init_connection()
-    if conn is None:
-        return None
+# Inicializar banco de dados SQLite (nativo do Python)
+@st.cache_resource
+def init_db():
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    c = conn.cursor()
+    
+    # Criar tabelas se não existirem
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS produtos (
+            id INTEGER PRIMARY KEY,
+            nome TEXT NOT NULL,
+            codigo TEXT,
+            codigo_barras TEXT,
+            descricao TEXT,
+            preco_custo REAL DEFAULT 0,
+            preco_venda REAL NOT NULL,
+            estoque INTEGER DEFAULT 0,
+            estoque_minimo INTEGER DEFAULT 5,
+            categoria_id INTEGER,
+            unidade TEXT DEFAULT 'un',
+            ativo INTEGER DEFAULT 1
+        )
+    ''')
+    
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS categorias (
+            id INTEGER PRIMARY KEY,
+            nome TEXT NOT NULL,
+            ativo INTEGER DEFAULT 1
+        )
+    ''')
+    
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS vendas (
+            id INTEGER PRIMARY KEY,
+            cliente_nome TEXT,
+            valor_total REAL NOT NULL,
+            forma_pagamento TEXT,
+            data TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            status TEXT DEFAULT 'concluida'
+        )
+    ''')
+    
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS venda_itens (
+            id INTEGER PRIMARY KEY,
+            venda_id INTEGER,
+            produto_id INTEGER,
+            quantidade INTEGER NOT NULL,
+            preco_unitario REAL NOT NULL,
+            FOREIGN KEY (venda_id) REFERENCES vendas (id),
+            FOREIGN KEY (produto_id) REFERENCES produtos (id)
+        )
+    ''')
+    
+    # Inserir dados de exemplo se tabela estiver vazia
+    c.execute("SELECT COUNT(*) FROM produtos")
+    if c.fetchone()[0] == 0:
+        # Inserir algumas categorias
+        categorias = [
+            (1, "Alimentos"),
+            (2, "Bebidas"),
+            (3, "Limpeza"),
+            (4, "Higiene Pessoal")
+        ]
+        c.executemany("INSERT INTO categorias (id, nome) VALUES (?, ?)", categorias)
+        
+        # Inserir alguns produtos de exemplo
+        produtos = [
+            (1, "Arroz 5kg", "P001", "7896254301245", "Arroz tipo 1", 15.50, 21.90, 50, 10, 1, "pct"),
+            (2, "Feijão 1kg", "P002", "7896254302245", "Feijão carioca", 6.50, 9.90, 40, 8, 1, "pct"),
+            (3, "Óleo de Soja", "P003", "7896254303245", "Óleo de soja 900ml", 5.20, 8.50, 45, 10, 1, "un"),
+            (4, "Água Mineral 500ml", "P004", "7896254304245", "Água sem gás", 0.75, 2.50, 100, 20, 2, "un"),
+            (5, "Refrigerante Cola 2L", "P005", "7896254305245", "Refrigerante sabor cola", 5.50, 8.90, 30, 8, 2, "un"),
+            (6, "Detergente 500ml", "P006", "7896254306245", "Detergente líquido", 1.80, 3.50, 25, 5, 3, "un"),
+            (7, "Sabão em Pó 1kg", "P007", "7896254307245", "Sabão em pó", 8.75, 15.90, 20, 5, 3, "un"),
+            (8, "Papel Higiênico 4un", "P008", "7896254308245", "Pacote com 4 rolos", 5.25, 9.50, 40, 8, 4, "pct"),
+            (9, "Sabonete", "P009", "7896254309245", "Sabonete 90g", 1.20, 2.75, 60, 12, 4, "un"),
+            (10, "Shampoo 350ml", "P010", "7896254310245", "Shampoo para todos os tipos de cabelo", 7.90, 15.90, 18, 5, 4, "un")
+        ]
+        c.executemany('''
+            INSERT INTO produtos 
+            (id, nome, codigo, codigo_barras, descricao, preco_custo, preco_venda, 
+            estoque, estoque_minimo, categoria_id, unidade) 
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', produtos)
+    
+    conn.commit()
+    return conn
+
+# Executar consultas SQL
+def run_query(query, params=(), fetch=True):
+    conn = init_db()
+    cursor = conn.cursor()
     
     try:
-        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-            if params:
-                cur.execute(query, params)
-            else:
-                cur.execute(query)
+        cursor.execute(query, params)
+        
+        if fetch:
+            columns = [desc[0] for desc in cursor.description]
+            results = cursor.fetchall()
             
-            if query.strip().upper().startswith("SELECT"):
-                return [dict(row) for row in cur.fetchall()]
-            else:
-                conn.commit()
-                if cur.rowcount > 0:
-                    return cur.rowcount
-                if hasattr(cur, 'lastrowid'):
-                    return cur.lastrowid
-                return True
+            # Converter para lista de dicionários
+            return [dict(zip(columns, row)) for row in results]
+        else:
+            conn.commit()
+            if cursor.lastrowid:
+                return cursor.lastrowid
+            return cursor.rowcount
     except Exception as e:
         st.error(f"Erro na consulta: {str(e)}")
         return None
 
 # API para buscar produto pelo código de barras
+@st.cache_data(ttl=5)
 def get_product_by_barcode(barcode):
     if not barcode:
         return None
@@ -64,33 +141,26 @@ def get_product_by_barcode(barcode):
         SELECT p.*, c.nome as categoria_nome 
         FROM produtos p 
         LEFT JOIN categorias c ON p.categoria_id = c.id 
-        WHERE (p.codigo_barras = %s OR p.codigo = %s) 
-        AND p.ativo = true
+        WHERE (p.codigo_barras = ? OR p.codigo = ?) 
+        AND p.ativo = 1
         LIMIT 1
     """
     
     products = run_query(query, (barcode, barcode))
     
     if products and len(products) > 0:
-        product = products[0]
-        # Atualizar timestamp de leitura
-        update_query = """
-            UPDATE produtos 
-            SET ultima_leitura = CURRENT_TIMESTAMP 
-            WHERE id = %s
-        """
-        run_query(update_query, (product['id'],))
-        return product
+        return products[0]
     
     return None
 
 # Obter todos os produtos
+@st.cache_data(ttl=5)
 def get_all_products():
     query = """
         SELECT p.*, c.nome as categoria_nome 
         FROM produtos p 
         LEFT JOIN categorias c ON p.categoria_id = c.id 
-        WHERE p.ativo = true 
+        WHERE p.ativo = 1
         ORDER BY p.nome
     """
     
@@ -107,16 +177,13 @@ def create_sale(items, customer_name, payment_method):
     insert_query = """
         INSERT INTO vendas 
         (cliente_nome, valor_total, forma_pagamento, status) 
-        VALUES (%s, %s, %s, 'concluida') 
-        RETURNING id
+        VALUES (?, ?, ?, 'concluida')
     """
     
-    result = run_query(insert_query, (customer_name, total, payment_method))
+    sale_id = run_query(insert_query, (customer_name, total, payment_method), fetch=False)
     
-    if not result:
+    if not sale_id:
         return False, "Falha ao criar venda"
-    
-    venda_id = result[0]['id'] if isinstance(result, list) else result
     
     # 2. Inserir itens e atualizar estoque
     for item in items:
@@ -124,19 +191,22 @@ def create_sale(items, customer_name, payment_method):
         item_query = """
             INSERT INTO venda_itens 
             (venda_id, produto_id, quantidade, preco_unitario) 
-            VALUES (%s, %s, %s, %s)
+            VALUES (?, ?, ?, ?)
         """
-        run_query(item_query, (venda_id, item['id'], item['quantidade'], item['preco_venda']))
+        run_query(item_query, (sale_id, item['id'], item['quantidade'], item['preco_venda']), fetch=False)
         
         # Atualizar estoque
         update_query = """
             UPDATE produtos 
-            SET estoque = estoque - %s 
-            WHERE id = %s
+            SET estoque = estoque - ? 
+            WHERE id = ?
         """
-        run_query(update_query, (item['quantidade'], item['id']))
+        run_query(update_query, (item['quantidade'], item['id']), fetch=False)
     
-    return True, venda_id
+    # Limpar cache para refletir as alterações
+    get_all_products.clear()
+    
+    return True, sale_id
 
 # Gerar recibo HTML
 def generate_receipt_html(sale_id, items, customer_name, payment_method, total):
@@ -276,7 +346,7 @@ def main():
         barcode_input = st.text_input("Digite o código de barras", 
                                      placeholder="EAN, código interno, etc.")
         
-        if st.button("Buscar Produto") or barcode_input:
+        if st.button("Buscar Produto", type="primary") or barcode_input:
             if barcode_input:
                 product = get_product_by_barcode(barcode_input)
                 
