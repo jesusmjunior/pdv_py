@@ -1,15 +1,32 @@
 import streamlit as st
-import psycopg2
-import psycopg2.extras
 import io
 import os
 import datetime
 import time
 import base64
 import json
-import pandas as pd
-from PIL import Image
-import numpy as np
+
+# Importações seguras com fallbacks para ambiente cloud
+try:
+    import psycopg2
+    import psycopg2.extras
+    HAS_POSTGRES = True
+except ImportError:
+    HAS_POSTGRES = False
+    st.error("Erro: Biblioteca psycopg2 não encontrada. Instale com: pip install psycopg2-binary")
+
+try:
+    import pandas as pd
+    HAS_PANDAS = True
+except ImportError:
+    HAS_PANDAS = False
+    
+try:
+    from PIL import Image
+    import numpy as np
+    HAS_IMAGE_SUPPORT = True
+except ImportError:
+    HAS_IMAGE_SUPPORT = False
 
 # Importações compatíveis com Streamlit Cloud
 try:
@@ -40,6 +57,10 @@ st.set_page_config(
 
 # Configuração do banco de dados PostgreSQL
 def get_db_connection():
+    if not HAS_POSTGRES:
+        st.error("Impossível conectar ao banco de dados: biblioteca psycopg2 não disponível")
+        return None
+        
     try:
         conn = psycopg2.connect(
             host="34.95.252.164",
@@ -53,11 +74,11 @@ def get_db_connection():
         return conn
     except Exception as e:
         st.error(f"Erro de conexão com banco de dados: {str(e)}")
-        raise e
+        return None
 
 # Função para decodificar códigos de barras (compatível com Streamlit Cloud)
 def decode_barcode(image):
-    if not HAS_BARCODE_SUPPORT:
+    if not HAS_BARCODE_SUPPORT or not HAS_IMAGE_SUPPORT:
         st.info("📷 Leitura automática de código de barras indisponível na nuvem. Digite o código manualmente.")
         return None
     
@@ -84,6 +105,9 @@ def decode_barcode(image):
 # Função para buscar produto por código de barras
 def get_product_by_barcode(barcode):
     conn = get_db_connection()
+    if conn is None:
+        return None
+        
     cursor = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
     
     try:
@@ -118,6 +142,9 @@ def get_product_by_barcode(barcode):
 # Função para obter todos os produtos
 def get_all_products():
     conn = get_db_connection()
+    if conn is None:
+        return []
+        
     cursor = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
     
     try:
@@ -138,6 +165,9 @@ def get_all_products():
 # Função para criar venda
 def create_sale(items, customer_name, payment_method, payment_value=None):
     conn = get_db_connection()
+    if conn is None:
+        return False, "Erro de conexão com o banco de dados"
+        
     cursor = conn.cursor()
     
     try:
@@ -182,6 +212,9 @@ def create_sale(items, customer_name, payment_method, payment_value=None):
 # Função para cadastrar novo produto
 def create_product(product_data):
     conn = get_db_connection()
+    if conn is None:
+        return False, "Erro de conexão com o banco de dados"
+        
     cursor = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
     
     try:
@@ -235,6 +268,9 @@ def create_product(product_data):
 # Função para obter categorias
 def get_categories():
     conn = get_db_connection()
+    if conn is None:
+        return []
+        
     cursor = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
     
     try:
@@ -248,6 +284,18 @@ def get_categories():
 # Função para obter estatísticas para o dashboard
 def get_dashboard_data():
     conn = get_db_connection()
+    if conn is None:
+        # Retornar dados vazios se não conseguir conectar
+        return {
+            'total_produtos': 0,
+            'estoque_baixo': 0,
+            'valor_estoque': 0,
+            'vendas_recentes_qtd': 0,
+            'vendas_recentes_valor': 0,
+            'produtos_mais_vendidos': [],
+            'vendas_por_dia': []
+        }
+        
     cursor = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
     
     try:
@@ -586,8 +634,12 @@ def main():
             uploaded_file = st.file_uploader("Ou envie uma imagem", 
                                             type=["jpg", "jpeg", "png"])
             
-            # Ou usar a câmera
-            camera_input = st.camera_input("Ou use a câmera")
+            # Ou usar a câmera (se suportado)
+            if HAS_IMAGE_SUPPORT:
+                camera_input = st.camera_input("Ou use a câmera")
+            else:
+                camera_input = None
+                st.info("Captura de câmera não disponível neste ambiente")
             
             barcode = None
             
@@ -596,18 +648,24 @@ def main():
                 barcode = barcode_input
                 st.success(f"Código inserido: {barcode}")
             
-            elif uploaded_file:
-                image = Image.open(uploaded_file)
-                barcode = decode_barcode(image)
-                
-                if barcode:
-                    st.success(f"Código detectado: {barcode}")
-                else:
-                    st.warning("Nenhum código detectado na imagem")
+            elif uploaded_file and HAS_IMAGE_SUPPORT:
+                try:
+                    image = Image.open(uploaded_file)
+                    barcode = decode_barcode(image)
+                    
+                    if barcode:
+                        st.success(f"Código detectado: {barcode}")
+                    else:
+                        st.warning("Nenhum código detectado na imagem")
+                except Exception as e:
+                    st.error(f"Erro ao processar imagem: {str(e)}")
             
-            elif camera_input:
-                image = Image.open(camera_input)
-                barcode = decode_barcode(image)
+            elif camera_input and HAS_IMAGE_SUPPORT:
+                try:
+                    image = Image.open(camera_input)
+                    barcode = decode_barcode(image)
+                except:
+                    st.error("Erro ao processar imagem da câmera")
                 
                 if barcode:
                     st.success(f"Código detectado: {barcode}")
@@ -719,21 +777,28 @@ def main():
             
             # Uso de câmera para ler código de barras
             st.subheader("Ler código de barras com câmera")
-            use_camera = st.checkbox("Usar câmera para código de barras")
             
-            if use_camera:
-                camera_input = st.camera_input("Capturar código de barras")
-                if camera_input:
-                    image = Image.open(camera_input)
-                    barcode = decode_barcode(image)
-                    
-                    if barcode:
-                        st.success(f"Código detectado: {barcode}")
-                        # Preencher campo de código de barras
-                        codigo_barras = barcode
-                        st.session_state['codigo_barras'] = barcode
-                    else:
-                        st.warning("Nenhum código detectado na imagem. Tente novamente.")
+            if HAS_IMAGE_SUPPORT and HAS_BARCODE_SUPPORT:
+                use_camera = st.checkbox("Usar câmera para código de barras")
+                
+                if use_camera:
+                    camera_input = st.camera_input("Capturar código de barras")
+                    if camera_input:
+                        try:
+                            image = Image.open(camera_input)
+                            barcode = decode_barcode(image)
+                            
+                            if barcode:
+                                st.success(f"Código detectado: {barcode}")
+                                # Preencher campo de código de barras
+                                codigo_barras = barcode
+                                st.session_state['codigo_barras'] = barcode
+                            else:
+                                st.warning("Nenhum código detectado na imagem. Tente novamente.")
+                        except:
+                            st.error("Erro ao processar imagem da câmera")
+            else:
+                st.info("Recurso de leitura de código de barras não disponível neste ambiente")
             
             # Botão de cadastro
             submit = st.form_submit_button("Cadastrar Produto")
