@@ -1,7 +1,6 @@
 import streamlit as st
 import pandas as pd
 import time
-import cv2
 from PIL import Image
 import io
 import datetime
